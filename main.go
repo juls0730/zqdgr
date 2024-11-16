@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -223,7 +224,19 @@ func main() {
 		log.Fatal(err)
 	}
 
-	command := os.Args[1]
+	var command string
+	var commandIndex int
+
+	for i, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+
+		command = arg
+		commandIndex = i
+		break
+	}
+
 	watchMode := false
 	var scriptName string
 	switch command {
@@ -241,11 +254,17 @@ func main() {
 		fmt.Println("zqdgr.config.json created successfully")
 		return
 	case "watch":
-		if len(os.Args) < 3 {
+		if len(os.Args) < (commandIndex+1)+1 {
 			log.Fatal("please specify a script to run")
 		}
 		watchMode = true
-		scriptName = os.Args[2]
+		for i := commandIndex + 1; i < len(os.Args); i++ {
+			if strings.HasPrefix(os.Args[i], "-") {
+				continue
+			}
+
+			scriptName = os.Args[i]
+		}
 	default:
 		scriptName = command
 	}
