@@ -1,11 +1,11 @@
 # ZQDGR
 
-ZQDGR is Zoe's Quick and Dirty Golang Runner. This is a simple tool that lets you run a go project in a similar way to how you would use npm. ZQDGR lets you watch files and rebuild your project as you make changes. ZQDGR also include an optional websocket server that will notify listeners that a rebuild has occured, this is very useful for live reloading when doing web development with Go.
+ZQDGR is Zoe's Quick and Dirty Golang Runner. This is a simple tool that lets you run a go project in a similar way to how you would use npm. ZQDGR lets you watch files and rebuild your project as you make changes. ZQDGR also includes an optional websocket server that will notify listeners that a rebuild has occurred, this is very useful for live reloading when doing web development with Go.
 
 ## Install
 
 ```bash
-go install github.com/juls0730/zqdgr
+go install github.com/juls0730/zqdgr@latest
 ```
 
 ## Usage
