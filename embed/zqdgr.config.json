@@ -1,0 +1,13 @@
+{
+    "name": "Go Project",
+    "version": "0.0.1",
+    "description": "Example description",
+    "author": "you",
+    "license": "BSL-1.0",
+    "scripts": {
+        "build": "go build",
+        "dev": "go run main.go"
+    },
+    "pattern": "**/*.go",
+    "excluded_dirs": []
+}
