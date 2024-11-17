@@ -10,9 +10,56 @@ go install github.com/juls0730/zqdgr@latest
 
 ## Usage
 
+Full usage
+```Bash
+zqdgr [options] <command>
+```
+
+The list of commands is
+- `init`
+
+  generates a zqdgr.config.json file in the current directory
+- `watch <script>`
+  
+  runs the script in "watch mode", when files that follow the pattern in zqdgr.config.json change, the script restarts
+- `<script>`
+  
+  runs the script
+
+
+ZQDGR has the following list of options
+- `-no-ws`
+  
+  disables the web socket server running at 2067
+
+Example usage:
 ```bash
 zqdgr init
 zqdgr watch dev
+```
+
+### ZQDGR websocket
+ZQDGR comes with a websocket to notify listeners that the application has updates, the websocket is accessible at `127.0.0.1:2067/ws`. An example dev script to listen for rebuilds might look like this
+```Javascript
+let host = window.location.hostname;
+const socket = new WebSocket('ws://' + host + ':2067/ws'); 
+
+socket.addEventListener('message', (event) => {
+    if (event.data === 'refresh') {
+        async function testPage() {
+            try {
+            let res = await fetch(window.location.href)
+            } catch (error) {
+                console.error(error);
+                setTimeout(testPage, 300);
+                return;
+            }
+            window.location.reload();
+        }
+
+        testPage();
+    }
+});
 ```
 
 ## Attribution
