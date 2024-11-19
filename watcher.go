@@ -1,14 +1,10 @@
-// There is some dead code in here because I pulled out the parts I needed to get it working, deal with this later lol.
-
 package main
 
 import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/bmatcuk/doublestar"
 	"github.com/fsnotify/fsnotify"
@@ -54,7 +50,6 @@ type FileWatcher interface {
 	Close() error
 	AddFiles() error
 	add(path string) error
-	Watch(jobs chan<- string)
 	getConfig() *WatcherConfig
 }
 
@@ -69,32 +64,6 @@ func (n NotifyWatcher) Close() error {
 
 func (n NotifyWatcher) AddFiles() error {
 	return addFiles(n)
-}
-
-func (n NotifyWatcher) Watch(jobs chan<- string) {
-	for {
-		select {
-		case ev := <-n.watcher.Events:
-			if ev.Op&fsnotify.Remove == fsnotify.Remove || ev.Op&fsnotify.Write == fsnotify.Write || ev.Op&fsnotify.Create == fsnotify.Create {
-				// Assume it is a directory and track it.
-				if directoryShouldBeTracked(n.cfg, ev.Name) {
-					n.watcher.Add(ev.Name)
-				}
-				if pathMatches(n.cfg, ev.Name) {
-					jobs <- ev.Name
-				}
-			}
-
-		case err := <-n.watcher.Errors:
-			if v, ok := err.(*os.SyscallError); ok {
-				if v.Err == syscall.EINTR {
-					continue
-				}
-				log.Fatal("watcher.Error: SyscallError:", v)
-			}
-			log.Fatal("watcher.Error:", err)
-		}
-	}
 }
 
 func (n NotifyWatcher) add(path string) error {

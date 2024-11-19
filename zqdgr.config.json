@@ -1,6 +1,6 @@
 {
     "name": "zqdgr",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "description": "zqdgr is a quick and dirty Golang runner",
     "author": "juls0730",
     "license": "BSL-1.0",
@@ -13,8 +13,5 @@
         "build": "go build -o zqdgr",
         "dev": "sleep 5; echo 'test' && sleep 2 && echo 'test2'"
     },
-    "pattern": "**/*.go",
-    "excluded_dirs": [
-        "folder"
-    ]
+    "pattern": "**/*.go"
 }

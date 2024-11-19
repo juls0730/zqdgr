@@ -115,8 +115,6 @@ func (s *Script) Stop() error {
 }
 
 func (s *Script) Restart() error {
-	println("Restarting script")
-
 	s.mutex.Lock()
 
 	s.isRestarting = true
@@ -311,10 +309,18 @@ func main() {
 		// iterate over every letter in the pattern
 		for _, p := range config.Pattern {
 			if string(p) == "{" {
+				if inMatch {
+					log.Fatal("unmatched { in pattern")
+				}
+
 				inMatch = true
 			}
 
 			if string(p) == "}" {
+				if !inMatch {
+					log.Fatal("unmatched } in pattern")
+				}
+
 				inMatch = false
 			}
 
@@ -326,6 +332,10 @@ func main() {
 			}
 
 			currentPattern += string(p)
+		}
+
+		if inMatch {
+			log.Fatal("unmatched } in pattern")
 		}
 
 		if currentPattern != "" {
@@ -411,6 +421,4 @@ func main() {
 	}
 
 	script.Wait()
-
-	log.Println("Script finished")
 }
