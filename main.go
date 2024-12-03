@@ -47,13 +47,15 @@ type Script struct {
 	wg           sync.WaitGroup
 }
 
-func NewCommand(scriptName string) *exec.Cmd {
+func NewCommand(scriptName string, args ...string) *exec.Cmd {
 	if script, ok := config.Scripts[scriptName]; ok {
+		fullCmd := strings.Join(append([]string{script}, args...), " ")
+
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
-			cmd = exec.Command("cmd", "/C", script)
+			cmd = exec.Command("cmd", "/C", fullCmd)
 		} else {
-			cmd = exec.Command("sh", "-c", script)
+			cmd = exec.Command("sh", "-c", fullCmd)
 		}
 
 		cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -70,8 +72,8 @@ func NewCommand(scriptName string) *exec.Cmd {
 	}
 }
 
-func NewScript(scriptName string) *Script {
-	command := NewCommand(scriptName)
+func NewScript(scriptName string, args ...string) *Script {
+	command := NewCommand(scriptName, args...)
 
 	if command == nil {
 		log.Fatal("script not found")
@@ -224,15 +226,22 @@ func main() {
 
 	var command string
 	var commandIndex int
+	var commandArgs []string
 
 	for i, arg := range os.Args[1:] {
+		if arg == "--" {
+			commandArgs = os.Args[i+2:]
+			break
+		}
+
 		if strings.HasPrefix(arg, "-") {
 			continue
 		}
 
-		command = arg
-		commandIndex = i
-		break
+		if command == "" {
+			command = arg
+			commandIndex = i
+		}
 	}
 
 	watchMode := false
@@ -267,7 +276,7 @@ func main() {
 		scriptName = command
 	}
 
-	script = NewScript(scriptName)
+	script = NewScript(scriptName, commandArgs...)
 
 	if err := script.Start(); err != nil {
 		log.Fatal(err)
