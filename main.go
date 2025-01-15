@@ -368,6 +368,7 @@ func main() {
 			}
 
 			cmd = exec.Command(filepath.Join(tempDir, "main"), projectDir)
+			cmd.Dir = projectDir
 
 			err = cmd.Run()
 			if err != nil {

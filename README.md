@@ -76,7 +76,7 @@ Every initialize script is expected to follow a few rules:
 - The project must be a zqdgr project
 - The `build` script must exist and must export a binary named `main`
 
-ZQDGR passes your init script the directory that is being initialized as the first and only argument. When your binary is executed, there is a git repository and the project is in the following state:
+ZQDGR passes your init script the directory that is being initialized as the first and only argument and runs the script in the target directory. When your binary is executed, there is a git repository and the project is in the following state:
 
 - go.mod
 - main.go
