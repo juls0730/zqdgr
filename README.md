@@ -19,6 +19,11 @@ The list of commands is
 - `init`
 
   generates a zqdgr.config.json file in the current directory
+
+- `new [github repo]`
+  
+  Creates a new golang project with zqdgr and can optionally run scripts from a github repo
+
 - `watch <script>`
   
   runs the script in "watch mode", when files that follow the pattern in zqdgr.config.json change, the script restarts
@@ -61,6 +66,17 @@ socket.addEventListener('message', (event) => {
     }
 });
 ```
+
+## ZQDGR `new` scripts
+
+With ZQDGR, you can easily initialize a new project with `zqdgr new` and optionally, you can specify a git repo to use as the initializer script. An example script is available at [github.com/juls0730/zqdgr-script-example](https://github.com/juls0730/zqdgr-script-example).
+
+Every initialize script is expected to follow a few rules:
+
+- The project must be a zqdgr project
+- The `build` script must exist and must export a binary named `main`
+
+ZQDGR passes your init script the directory that is being initialized in as the first and only argument
 
 ## Attribution
 

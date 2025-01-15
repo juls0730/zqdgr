@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	_ "embed"
 	"encoding/json"
 	"flag"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -225,7 +227,6 @@ func main() {
 	}
 
 	var command string
-	var commandIndex int
 	var commandArgs []string
 
 	for i, arg := range os.Args[1:] {
@@ -234,14 +235,12 @@ func main() {
 			break
 		}
 
-		if strings.HasPrefix(arg, "-") {
+		if command == "" {
+			command = arg
 			continue
 		}
 
-		if command == "" {
-			command = arg
-			commandIndex = i
-		}
+		commandArgs = append(commandArgs, arg)
 	}
 
 	watchMode := false
@@ -260,17 +259,134 @@ func main() {
 
 		fmt.Println("zqdgr.config.json created successfully")
 		return
+	case "new":
+		var projectName string
+		var gitRepo string
+		// if no project name was provided, or if the first argument has a slash (it's a url)
+		if len(commandArgs) < 1 || strings.Contains(commandArgs[0], "/") {
+			fmt.Printf("What is the name of the project: ")
+			scanner := bufio.NewScanner(os.Stdin)
+			scanner.Scan()
+			projectName = scanner.Text()
+
+			if len(commandArgs) > 0 {
+				gitRepo = commandArgs[0]
+			}
+		} else {
+			projectName = commandArgs[0]
+
+			if len(commandArgs) > 1 {
+				gitRepo = commandArgs[1]
+			}
+		}
+
+		if _, err := os.Stat(projectName); err == nil {
+			log.Fatal("project already exists")
+		}
+
+		err := os.MkdirAll(projectName, 0755)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		cwd, err := os.Getwd()
+		if err != nil {
+			log.Fatal(err)
+		}
+		projectDir := filepath.Join(cwd, projectName)
+
+		fmt.Println("Initializing git repository")
+		cmd := exec.Command("git", "init")
+		cmd.Dir = projectDir
+
+		err = cmd.Run()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Println("Initializing zqdgr project")
+
+		zqdgrExe, err := os.Executable()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		cmd = exec.Command(zqdgrExe, "init")
+		cmd.Dir = projectDir
+
+		err = cmd.Run()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		fmt.Printf("What is the module path for %s (e.g. github.com/user/project): ", projectName)
+		scanner := bufio.NewScanner(os.Stdin)
+		scanner.Scan()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		projectPath := scanner.Text()
+		cmd = exec.Command("go", "mod", "init", projectPath)
+		cmd.Dir = projectDir
+
+		err = cmd.Run()
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		goMain, err := os.Create(filepath.Join(projectDir, "main.go"))
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		goMain.WriteString("package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"Hello, World!\")\n}\n")
+
+		if gitRepo != "" {
+			// execute a create script
+			tempDir, err := os.MkdirTemp(projectName, "zqdgr")
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer os.RemoveAll(tempDir)
+
+			fmt.Printf("Cloning %s\n", gitRepo)
+			cmd = exec.Command("git", "clone", gitRepo, tempDir)
+
+			err = cmd.Run()
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			cmd = exec.Command("zqdgr", "build")
+			cmd.Dir = tempDir
+
+			err = cmd.Run()
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			cmd = exec.Command(filepath.Join(tempDir, "main"), projectDir)
+
+			err = cmd.Run()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		return
 	case "watch":
-		if len(os.Args) < (commandIndex+1)+1 {
+		if len(commandArgs) < 1 {
 			log.Fatal("please specify a script to run")
 		}
 		watchMode = true
-		for i := commandIndex + 1; i < len(os.Args); i++ {
-			if strings.HasPrefix(os.Args[i], "-") {
+		for i := 0; i < len(commandArgs); i++ {
+			if strings.HasPrefix(commandArgs[i], "-") {
 				continue
 			}
 
-			scriptName = os.Args[i]
+			scriptName = commandArgs[i]
 		}
 	default:
 		scriptName = command
