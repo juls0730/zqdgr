@@ -20,7 +20,7 @@ The list of commands is
 
   generates a zqdgr.config.json file in the current directory
 
-- `new [github repo]`
+- `new [project name] [github repo]`
   
   Creates a new golang project with zqdgr and can optionally run scripts from a github repo
 
