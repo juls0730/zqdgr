@@ -367,8 +367,11 @@ func main() {
 				log.Fatal(err)
 			}
 
-			cmd = exec.Command(filepath.Join(tempDir, "main"), projectDir)
+			cmd = exec.Command(filepath.Join(projectDir, filepath.Base(tempDir), "main"), projectDir)
 			cmd.Dir = projectDir
+			cmd.Stdin = os.Stdin
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
 
 			err = cmd.Run()
 			if err != nil {
