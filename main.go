@@ -13,9 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,8 +22,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 )
-
-var executableName string
 
 //go:embed embed/zqdgr.config.json
 var zqdgrConfig []byte
@@ -48,6 +44,7 @@ type Config struct {
 }
 
 type Script struct {
+	zqdgr        *ZQDGR
 	command      *exec.Cmd
 	mutex        sync.Mutex
 	scriptName   string
@@ -57,59 +54,43 @@ type Script struct {
 	exitCode int
 }
 
-func flattenZQDGRScript(commandString string) string {
-	keys := make([]string, 0, len(config.Scripts))
-	for k := range config.Scripts {
-		keys = append(keys, k)
-	}
-
-	// Sort the keys in descending order in order to prevent scripts that might be substrings of other scripts to
-	// evaluate first.
-	sort.Slice(keys, func(i, j int) bool {
-		return len(keys[i]) > len(keys[j])
-	})
-
-	// escape scripts to be evaluated via regex
-	escapedKeys := make([]string, len(keys))
-	for i, key := range keys {
-		escapedKeys[i] = regexp.QuoteMeta(key)
-	}
-	pattern := `\b(` + executableName + `)\b` + `\s+` + `\b(` + strings.Join(escapedKeys, "|") + `)\b`
-
-	re := regexp.MustCompile(pattern)
-
-	currentCommand := commandString
-	for {
-		previousCommand := currentCommand
-		currentCommand = re.ReplaceAllStringFunc(currentCommand, func(match string) string {
-			// match the script name, not the whole `zqdgr script` command
-			match = strings.Split(match, " ")[1]
-
-			if val, ok := config.Scripts[match]; ok {
-				return val
-			}
-			return match
-		})
-
-		// If the current command has not changed, we have completely evaluated the command.
-		if currentCommand == previousCommand {
-			break
-		}
-	}
-
-	if re.MatchString(currentCommand) {
-		fmt.Println("Error: circular dependency detected in scripts")
-		os.Exit(1)
-	}
-
-	return currentCommand
+type ZQDGR struct {
+	Config           Config
+	WorkingDirectory string
+	EnableWebSocket  bool
+	WSServer         *WSServer
 }
 
-func NewCommand(scriptName string, args ...string) *exec.Cmd {
-	if script, ok := config.Scripts[scriptName]; ok {
-		fullCmd := strings.Join(append([]string{script}, args...), " ")
+type WSServer struct {
+	upgrader   websocket.Upgrader
+	clients    map[*websocket.Conn]bool
+	clientsMux sync.Mutex
+}
 
-		fullCmd = flattenZQDGRScript(fullCmd)
+func NewZQDGR(enableWebSocket bool, configDir string) *ZQDGR {
+	zqdgr := &ZQDGR{
+		WorkingDirectory: configDir,
+	}
+
+	zqdgr.loadConfig()
+
+	zqdgr.EnableWebSocket = enableWebSocket
+	zqdgr.WSServer = &WSServer{
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true
+			},
+		},
+		clients:    make(map[*websocket.Conn]bool),
+		clientsMux: sync.Mutex{},
+	}
+
+	return zqdgr
+}
+
+func (zqdgr *ZQDGR) NewCommand(scriptName string, args ...string) *exec.Cmd {
+	if script, ok := zqdgr.Config.Scripts[scriptName]; ok {
+		fullCmd := strings.Join(append([]string{script}, args...), " ")
 
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
@@ -117,6 +98,8 @@ func NewCommand(scriptName string, args ...string) *exec.Cmd {
 		} else {
 			cmd = exec.Command("sh", "-c", fullCmd)
 		}
+
+		cmd.Dir = zqdgr.WorkingDirectory
 
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Setpgid: true,
@@ -132,8 +115,8 @@ func NewCommand(scriptName string, args ...string) *exec.Cmd {
 	}
 }
 
-func NewScript(scriptName string, args ...string) *Script {
-	command := NewCommand(scriptName, args...)
+func (zqdgr *ZQDGR) NewScript(scriptName string, args ...string) *Script {
+	command := zqdgr.NewCommand(scriptName, args...)
 
 	if command == nil {
 		log.Fatal("script not found")
@@ -141,6 +124,7 @@ func NewScript(scriptName string, args ...string) *Script {
 	}
 
 	return &Script{
+		zqdgr:        zqdgr,
 		command:      command,
 		scriptName:   scriptName,
 		isRestarting: false,
@@ -186,7 +170,7 @@ func (s *Script) Restart() error {
 
 	if s.command.Process != nil {
 		var signal syscall.Signal
-		switch config.ShutdownSignal {
+		switch s.zqdgr.Config.ShutdownSignal {
 		case "SIGINT":
 			signal = syscall.SIGINT
 		case "SIGTERM":
@@ -202,7 +186,7 @@ func (s *Script) Restart() error {
 		}
 	}
 
-	s.command = NewCommand(s.scriptName)
+	s.command = s.zqdgr.NewCommand(s.scriptName)
 
 	if s.command == nil {
 		// this should never happen
@@ -217,17 +201,17 @@ func (s *Script) Restart() error {
 	err := s.Start()
 
 	// tell the websocket clients to refresh
-	if enableWebSocket {
-		clientsMux.Lock()
-		for client := range clients {
+	if s.zqdgr.EnableWebSocket {
+		s.zqdgr.WSServer.clientsMux.Lock()
+		for client := range s.zqdgr.WSServer.clients {
 			err := client.WriteMessage(websocket.TextMessage, []byte("refresh"))
 			if err != nil {
 				log.Printf("error broadcasting refresh: %v", err)
 				client.Close()
-				delete(clients, client)
+				delete(s.zqdgr.WSServer.clients, client)
 			}
 		}
-		clientsMux.Unlock()
+		s.zqdgr.WSServer.clientsMux.Unlock()
 	}
 
 	return err
@@ -237,49 +221,36 @@ func (s *Script) Wait() {
 	s.wg.Wait()
 }
 
-func handleWs(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+func (wsServer *WSServer) handleWs(w http.ResponseWriter, r *http.Request) {
+	conn, err := wsServer.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("error upgrading connection: %v", err)
 		return
 	}
 
-	clientsMux.Lock()
-	clients[conn] = true
-	clientsMux.Unlock()
+	wsServer.clientsMux.Lock()
+	wsServer.clients[conn] = true
+	wsServer.clientsMux.Unlock()
 
 	for {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
-			clientsMux.Lock()
-			delete(clients, conn)
-			clientsMux.Unlock()
+			wsServer.clientsMux.Lock()
+			delete(wsServer.clients, conn)
+			wsServer.clientsMux.Unlock()
 			break
 		}
 	}
 }
 
-var (
-	enableWebSocket = false
-	config          Config
-	script          *Script
-	upgrader        = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-	clients    = make(map[*websocket.Conn]bool)
-	clientsMux sync.Mutex
-)
-
-func loadConfig() error {
-	data, err := os.ReadFile("zqdgr.config.json")
+func (zqdgr *ZQDGR) loadConfig() error {
+	data, err := os.ReadFile(path.Join(zqdgr.WorkingDirectory, "zqdgr.config.json"))
 	if err == nil {
-		if err := json.Unmarshal(data, &config); err != nil {
+		if err := json.Unmarshal(data, &zqdgr.Config); err != nil {
 			return fmt.Errorf("error parsing config file: %v", err)
 		}
 	} else {
-		config = Config{
+		zqdgr.Config = Config{
 			Scripts: map[string]string{
 				"build": "go build",
 				"run":   "go run main.go",
@@ -293,22 +264,23 @@ func loadConfig() error {
 
 func main() {
 	noWs := flag.Bool("no-ws", false, "Disable WebSocket server")
+	configDir := flag.String("config", ".", "Path to the config directory")
+	flag.StringVar(configDir, "C", *configDir, "Path to the config directory")
+
 	flag.Parse()
 
-	if err := loadConfig(); err != nil {
-		log.Fatal(err)
-	}
+	os.Args = flag.Args()
+
+	zqdgr := NewZQDGR(*noWs, *configDir)
 
 	var command string
 	var commandArgs []string
 
-	// get the name of the executable, and if it's a path then get the base name
-	// this is mainly for testing
-	executableName = path.Base(os.Args[0])
-
-	for i, arg := range os.Args[1:] {
+	for i, arg := range os.Args {
 		if arg == "--" {
-			commandArgs = os.Args[i+2:]
+			if i+2 < len(os.Args) {
+				commandArgs = os.Args[i+2:]
+			}
 			break
 		}
 
@@ -462,7 +434,7 @@ func main() {
 			log.Fatal("please specify a script to run")
 		}
 		watchMode = true
-		for i := 0; i < len(commandArgs); i++ {
+		for i := range commandArgs {
 			if strings.HasPrefix(commandArgs[i], "-") {
 				continue
 			}
@@ -473,7 +445,7 @@ func main() {
 		scriptName = command
 	}
 
-	script = NewScript(scriptName, commandArgs...)
+	script := zqdgr.NewScript(scriptName, commandArgs...)
 
 	if err := script.Start(); err != nil {
 		log.Fatal(err)
@@ -487,7 +459,7 @@ func main() {
 		log.Println("Received signal, exiting...")
 		if script.command != nil {
 			var signal syscall.Signal
-			switch config.ShutdownSignal {
+			switch zqdgr.Config.ShutdownSignal {
 			case "SIGINT":
 				signal = syscall.SIGINT
 			case "SIGTERM":
@@ -506,10 +478,10 @@ func main() {
 
 	if watchMode {
 		if !*noWs {
-			enableWebSocket = true
+			zqdgr.EnableWebSocket = true
 
 			go func() {
-				http.HandleFunc("/ws", handleWs)
+				http.HandleFunc("/ws", zqdgr.WSServer.handleWs)
 				log.Printf("WebSocket server running on :2067")
 				if err := http.ListenAndServe(":2067", nil); err != nil {
 					log.Printf("WebSocket server error: %v", err)
@@ -517,7 +489,7 @@ func main() {
 			}()
 		}
 
-		if config.Pattern == "" {
+		if zqdgr.Config.Pattern == "" {
 			log.Fatal("watch pattern not specified in config")
 		}
 
@@ -525,7 +497,7 @@ func main() {
 		var currentPattern string
 		inMatch := false
 		// iterate over every letter in the pattern
-		for _, p := range config.Pattern {
+		for _, p := range zqdgr.Config.Pattern {
 			if string(p) == "{" {
 				if inMatch {
 					log.Fatal("unmatched { in pattern")
@@ -561,7 +533,7 @@ func main() {
 		}
 
 		watcherConfig := WatcherConfig{
-			excludedDirs: globList(config.ExcludedDirs),
+			excludedDirs: globList(zqdgr.Config.ExcludedDirs),
 			pattern:      paternArray,
 		}
 
