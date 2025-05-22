@@ -1,6 +1,9 @@
 # ZQDGR
 
-ZQDGR is Zoe's Quick and Dirty Golang Runner. This is a simple tool that lets you run a go project in a similar way to how you would use npm. ZQDGR lets you watch files and rebuild your project as you make changes. ZQDGR also includes an optional websocket server that will notify listeners that a rebuild has occurred, this is very useful for live reloading when doing web development with Go.
+ZQDGR is Zoe's Quick and Dirty Golang Runner. This is a simple tool that lets you run a go project in a similar way to
+how you would use npm. ZQDGR lets you watch files and rebuild your project as you make changes. ZQDGR also includes an
+optional websocket server that will notify listeners that a rebuild has occurred, this is very useful for live reloading
+when doing web development with Go.
 
 ## Install
 
@@ -44,7 +47,8 @@ zqdgr watch dev
 ```
 
 ### ZQDGR websocket
-ZQDGR comes with a websocket to notify listeners that the application has updates, the websocket is accessible at `127.0.0.1:2067/ws`. An example dev script to listen for rebuilds might look like this
+ZQDGR comes with a websocket to notify listeners that the application has updates, the websocket is accessible at
+`127.0.0.1:2067/ws`. An example dev script to listen for rebuilds might look like this
 ```Javascript
 let host = window.location.hostname;
 const socket = new WebSocket('ws://' + host + ':2067/ws'); 
@@ -67,16 +71,42 @@ socket.addEventListener('message', (event) => {
 });
 ```
 
+## Configuration
+
+ZQDGR is solely configured by a `zqdgr.config.json` file in the root of your project. The file has the following keys:
+
+| Key | Type | Description |
+| --- | --- | --- |
+| name | string | The name of the project |
+| version | string | The version of the project |
+| description | string | The description of the project |
+| author | string | The author of the project (probably you) |
+| license | string | The license of the project |
+| homepage | string | The URL to the homepage of the project |
+| repository | object | The repository of the project |
+| repository.type | string | The type of VCS that you use, most likely git |
+| repository.url | string | The place where you code is hosted. This should be a URI that can be used as is in a program such as git |
+| scripts | object | An object that maps a script name to a script command, which is just a shell command |
+| pattern | string | The GLOB pattern that ZQDGR will watch for changes |
+| excluded_dirs | array | The directories that ZQDGR will ignore when in the `watch` mode |
+| shutdown_signal | string | The signal that ZQDGR will use to shutdown the script. Currently the only supported signals are `SIGINT`, `SIGTERM`, and `SIGQUIT`, if no shutdown signal is specified, ZQDGR will default to `SIGKILL` |
+
+The only required key is `scripts`, the rest are optional, but we recommend you set the most important ones.
+
 ## ZQDGR `new` scripts
 
-With ZQDGR, you can easily initialize a new project with `zqdgr new` and optionally, you can specify a git repo to use as the initializer script. An example script is available at [github.com/juls0730/zqdgr-script-example](https://github.com/juls0730/zqdgr-script-example).
+Since ZQDGR v0.0.2, you can easily initialize a new project with `zqdgr new` and optionally, you can specify a git repo
+to use as the initializer script. An example script is available at
+[github.com/juls0730/zqdgr-script-example](https://github.com/juls0730/zqdgr-script-example).
 
 Every initialize script is expected to follow a few rules:
 
 - The project must be a zqdgr project
 - The `build` script must exist and must export a binary named `main`
 
-ZQDGR passes your init script the directory that is being initialized as the first and only argument and runs the script in the target directory. When your binary is executed, there is a git repository and the project is in the following state:
+ZQDGR passes your init script the directory that is being initialized as the first and only argument and runs the script
+in the target directory. When your binary is executed, there is a git repository and the project is in the following
+state:
 
 - go.mod
 - main.go

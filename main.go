@@ -11,8 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +24,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 )
+
+var executableName string
 
 //go:embed embed/zqdgr.config.json
 var zqdgrConfig []byte
@@ -36,9 +41,10 @@ type Config struct {
 		Type string `json:"type"`
 		URL  string `json:"url"`
 	} `json:"repository"`
-	Scripts      map[string]string `json:"scripts"`
-	Pattern      string            `json:"pattern"`
-	ExcludedDirs []string          `json:"excluded_dirs"`
+	Scripts        map[string]string `json:"scripts"`
+	Pattern        string            `json:"pattern"`
+	ExcludedDirs   []string          `json:"excluded_dirs"`
+	ShutdownSignal string            `json:"shutdown_signal"`
 }
 
 type Script struct {
@@ -47,11 +53,63 @@ type Script struct {
 	scriptName   string
 	isRestarting bool
 	wg           sync.WaitGroup
+	// the exit code of the script, only set after the script has exited
+	exitCode int
+}
+
+func flattenZQDGRScript(commandString string) string {
+	keys := make([]string, 0, len(config.Scripts))
+	for k := range config.Scripts {
+		keys = append(keys, k)
+	}
+
+	// Sort the keys in descending order in order to prevent scripts that might be substrings of other scripts to
+	// evaluate first.
+	sort.Slice(keys, func(i, j int) bool {
+		return len(keys[i]) > len(keys[j])
+	})
+
+	// escape scripts to be evaluated via regex
+	escapedKeys := make([]string, len(keys))
+	for i, key := range keys {
+		escapedKeys[i] = regexp.QuoteMeta(key)
+	}
+	pattern := `\b(` + executableName + `)\b` + `\s+` + `\b(` + strings.Join(escapedKeys, "|") + `)\b`
+
+	re := regexp.MustCompile(pattern)
+
+	currentCommand := commandString
+	for {
+		previousCommand := currentCommand
+		currentCommand = re.ReplaceAllStringFunc(currentCommand, func(match string) string {
+			// match the script name, not the whole `zqdgr script` command
+			match = strings.Split(match, " ")[1]
+
+			if val, ok := config.Scripts[match]; ok {
+				return val
+			}
+			return match
+		})
+
+		// If the current command has not changed, we have completely evaluated the command.
+		if currentCommand == previousCommand {
+			break
+		}
+	}
+
+	if re.MatchString(currentCommand) {
+		fmt.Println("Error: circular dependency detected in scripts")
+		os.Exit(1)
+	}
+
+	return currentCommand
 }
 
 func NewCommand(scriptName string, args ...string) *exec.Cmd {
 	if script, ok := config.Scripts[scriptName]; ok {
 		fullCmd := strings.Join(append([]string{script}, args...), " ")
+
+		fullCmd = flattenZQDGRScript(fullCmd)
 
 		var cmd *exec.Cmd
 		if runtime.GOOS == "windows" {
@@ -96,24 +154,27 @@ func (s *Script) Start() error {
 	s.wg.Add(1)
 
 	err := s.command.Start()
+	if err != nil {
+		s.wg.Done()
+		return err
+	}
 
 	go func() {
-		s.command.Wait()
+		err := s.command.Wait()
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				s.exitCode = exitError.ExitCode()
+			} else {
+				// Other errors (e.g., process not found, permission denied)
+				log.Printf("Error waiting for script %s: %v", s.scriptName, err)
+				s.exitCode = 1
+			}
+		}
+
 		if !s.isRestarting {
 			s.wg.Done()
 		}
 	}()
-
-	return err
-}
-
-func (s *Script) Stop() error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	err := syscall.Kill(-s.command.Process.Pid, syscall.SIGKILL)
-
-	s.wg.Done()
 
 	return err
 }
@@ -124,7 +185,19 @@ func (s *Script) Restart() error {
 	s.isRestarting = true
 
 	if s.command.Process != nil {
-		if err := syscall.Kill(-s.command.Process.Pid, syscall.SIGKILL); err != nil {
+		var signal syscall.Signal
+		switch config.ShutdownSignal {
+		case "SIGINT":
+			signal = syscall.SIGINT
+		case "SIGTERM":
+			signal = syscall.SIGTERM
+		case "SIGQUIT":
+			signal = syscall.SIGQUIT
+		default:
+			signal = syscall.SIGKILL
+		}
+
+		if err := syscall.Kill(-s.command.Process.Pid, signal); err != nil {
 			log.Printf("error killing previous process: %v", err)
 		}
 	}
@@ -228,6 +301,10 @@ func main() {
 
 	var command string
 	var commandArgs []string
+
+	// get the name of the executable, and if it's a path then get the base name
+	// this is mainly for testing
+	executableName = path.Base(os.Args[0])
 
 	for i, arg := range os.Args[1:] {
 		if arg == "--" {
@@ -409,7 +486,19 @@ func main() {
 
 		log.Println("Received signal, exiting...")
 		if script.command != nil {
-			syscall.Kill(-script.command.Process.Pid, syscall.SIGKILL)
+			var signal syscall.Signal
+			switch config.ShutdownSignal {
+			case "SIGINT":
+				signal = syscall.SIGINT
+			case "SIGTERM":
+				signal = syscall.SIGTERM
+			case "SIGQUIT":
+				signal = syscall.SIGQUIT
+			default:
+				signal = syscall.SIGKILL
+			}
+
+			syscall.Kill(-script.command.Process.Pid, signal)
 		}
 
 		os.Exit(0)
@@ -550,4 +639,5 @@ func main() {
 	}
 
 	script.Wait()
+	os.Exit(script.exitCode)
 }

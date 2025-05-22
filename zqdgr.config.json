@@ -1,6 +1,6 @@
 {
     "name": "zqdgr",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "zqdgr is a quick and dirty Golang runner",
     "author": "juls0730",
     "license": "BSL-1.0",
@@ -11,7 +11,13 @@
     },
     "scripts": {
         "build": "go build -o zqdgr",
-        "dev": "sleep 5; echo 'test' && sleep 2 && echo 'test2'"
+        "dev": "sleep 5; echo 'test' && sleep 2 && echo 'test2'",
+        "test": "zqdgr test:1 && zqdgr test:2 && zqdgr test:3 && zqdgr test:4",
+        "test:1": "echo 'a'",
+        "test:2": "false",
+        "test:3": "echo 'b'",
+        "test:4": "zqdgr test:3",
+        "recursive": "zqdgr recursive"
     },
     "pattern": "**/*.go"
 }
