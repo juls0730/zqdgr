@@ -14,44 +14,64 @@ go install github.com/juls0730/zqdgr@latest
 ## Usage
 
 Full usage
+
 ```Bash
 zqdgr [options] <command>
 ```
 
-The list of commands is
+### Commands
+
 - `init`
 
   generates a zqdgr.config.json file in the current directory
 
 - `new [project name] [github repo]`
-  
+
   Creates a new golang project with zqdgr and can optionally run scripts from a github repo
 
 - `watch <script>`
-  
+
   runs the script in "watch mode", when files that follow the pattern in zqdgr.config.json change, the script restarts
+
 - `<script>`
-  
+
   runs the script
 
+### Options
 
-ZQDGR has the following list of options
 - `-no-ws`
-  
+
   disables the web socket server running at 2067
 
+- `-config`
+
+  specifies the path to the config file
+
+- `-disable-reload-config`
+
+  disables reloading the config file when it changes
+
+- `-C`
+
+  specifies the path to use as the working directry
+
 Example usage:
+
 ```bash
 zqdgr init
 zqdgr watch dev
+zqdgr -config ./my-config.json watch dev
+zqdgr -C ./my-nested-project watch dev
 ```
 
 ### ZQDGR websocket
+
 ZQDGR comes with a websocket to notify listeners that the application has updates, the websocket is accessible at
 `127.0.0.1:2067/ws`. An example dev script to listen for rebuilds might look like this
+
 ```Javascript
 let host = window.location.hostname;
-const socket = new WebSocket('ws://' + host + ':2067/ws'); 
+const socket = new WebSocket('ws://' + host + ':2067/ws');
 
 socket.addEventListener('message', (event) => {
     if (event.data === 'refresh') {
@@ -75,21 +95,22 @@ socket.addEventListener('message', (event) => {
 
 ZQDGR is solely configured by a `zqdgr.config.json` file in the root of your project. The file has the following keys:
 
-| Key | Type | Description |
-| --- | --- | --- |
-| name | string | The name of the project |
-| version | string | The version of the project |
-| description | string | The description of the project |
-| author | string | The author of the project (probably you) |
-| license | string | The license of the project |
-| homepage | string | The URL to the homepage of the project |
-| repository | object | The repository of the project |
-| repository.type | string | The type of VCS that you use, most likely git |
-| repository.url | string | The place where you code is hosted. This should be a URI that can be used as is in a program such as git |
-| scripts | object | An object that maps a script name to a script command, which is just a shell command |
-| pattern | string | The GLOB pattern that ZQDGR will watch for changes |
-| excluded_dirs | array | The directories that ZQDGR will ignore when in the `watch` mode |
-| shutdown_signal | string | The signal that ZQDGR will use to shutdown the script. Currently the only supported signals are `SIGINT`, `SIGTERM`, and `SIGQUIT`, if no shutdown signal is specified, ZQDGR will default to `SIGKILL` |
+| Key              | Type   | Required | default | Description                                                                                              |
+| ---------------- | ------ | -------- | ------- | -------------------------------------------------------------------------------------------------------- |
+| name             | string | -        | -       | The name of the project                                                                                  |
+| version          | string | -        | -       | The version of the project                                                                               |
+| description      | string | -        | -       | The description of the project                                                                           |
+| author           | string | -        | -       | The author of the project (probably you)                                                                 |
+| license          | string | -        | -       | The license of the project                                                                               |
+| homepage         | string | -        | -       | The URL to the homepage of the project                                                                   |
+| repository       | object | -        | -       | The repository of the project                                                                            |
+| repository.type  | string | -        | -       | The type of VCS that you use, most likely git                                                            |
+| repository.url   | string | -        | -       | The place where you code is hosted. This should be a URI that can be used as is in a program such as git |
+| scripts          | object | true     | -       | An object that maps a script name to a script command, which is just a shell command                     |
+| pattern          | string | true     | -       | The GLOB pattern that ZQDGR will watch for changes                                                       |
+| excluded_globs   | array  | -        | -       | Globs that ZQDGR will ignore when in the `watch` mode                                                    |
+| shutdown_signal  | string | -        | SIGINT  | The signal that ZQDGR will use to shutdown the script. One of SIGKILL, SIGINT, SIGQUIT, SIGTERM          |
+| shutdown_timeout | int    | -        | 1       | The amount of time in seconds that ZQDGR will wait for the script to exit before force killing it.       |
 
 The only required key is `scripts`, the rest are optional, but we recommend you set the most important ones.
 

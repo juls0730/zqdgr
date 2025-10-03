@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"flag"
@@ -37,10 +38,13 @@ type Config struct {
 		Type string `json:"type"`
 		URL  string `json:"url"`
 	} `json:"repository"`
-	Scripts        map[string]string `json:"scripts"`
-	Pattern        string            `json:"pattern"`
-	ExcludedDirs   []string          `json:"excluded_dirs"`
-	ShutdownSignal string            `json:"shutdown_signal"`
+	Scripts map[string]string `json:"scripts"`
+	Pattern string            `json:"pattern"`
+	// Deprecated: use excludedGlobs instead
+	ExcludedDirs    []string `json:"excluded_dirs"`
+	ExcludedGlobs   []string `json:"excluded_files"`
+	ShutdownSignal  string   `json:"shutdown_signal"`
+	ShutdownTimeout int      `json:"shutdown_timeout"`
 }
 
 type Script struct {
@@ -72,7 +76,11 @@ func NewZQDGR(enableWebSocket bool, configDir string) *ZQDGR {
 		WorkingDirectory: configDir,
 	}
 
-	zqdgr.loadConfig()
+	err := zqdgr.loadConfig()
+	if err != nil {
+		log.Fatal(err)
+		return nil
+	}
 
 	zqdgr.EnableWebSocket = enableWebSocket
 	zqdgr.WSServer = &WSServer{
@@ -150,8 +158,10 @@ func (s *Script) Start() error {
 				s.exitCode = exitError.ExitCode()
 			} else {
 				// Other errors (e.g., process not found, permission denied)
-				log.Printf("Error waiting for script %s: %v", s.scriptName, err)
-				s.exitCode = 1
+				if !s.isRestarting {
+					log.Printf("Error waiting for script %s: %v", s.scriptName, err)
+					s.exitCode = 1
+				}
 			}
 		}
 
@@ -163,8 +173,11 @@ func (s *Script) Start() error {
 	return err
 }
 
-func (s *Script) Restart() error {
-	s.mutex.Lock()
+func (s *Script) Stop(lock bool) error {
+	if lock {
+		s.mutex.Lock()
+		defer s.mutex.Unlock()
+	}
 
 	s.isRestarting = true
 
@@ -183,7 +196,42 @@ func (s *Script) Restart() error {
 
 		if err := syscall.Kill(-s.command.Process.Pid, signal); err != nil {
 			log.Printf("error killing previous process: %v", err)
+			return err
 		}
+	}
+
+	dead := make(chan bool)
+	go func() {
+		s.command.Wait()
+		dead <- true
+	}()
+
+	shutdownTimeout := s.zqdgr.Config.ShutdownTimeout
+	if shutdownTimeout == 0 {
+		shutdownTimeout = 1
+	}
+
+	select {
+	case <-dead:
+	case <-time.After(time.Duration(shutdownTimeout) * time.Second):
+		log.Println("Script failed to stop after kill signal, force killing")
+
+		if err := syscall.Kill(-s.command.Process.Pid, syscall.SIGKILL); err != nil {
+			log.Printf("error killing previous process: %v", err)
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Script) Restart() error {
+	s.mutex.Lock()
+
+	err := s.Stop(false)
+	if err != nil {
+		s.mutex.Unlock()
+		return err
 	}
 
 	s.command = s.zqdgr.NewCommand(s.scriptName)
@@ -198,7 +246,7 @@ func (s *Script) Restart() error {
 
 	s.mutex.Unlock()
 
-	err := s.Start()
+	err = s.Start()
 
 	// tell the websocket clients to refresh
 	if s.zqdgr.EnableWebSocket {
@@ -246,7 +294,10 @@ func (wsServer *WSServer) handleWs(w http.ResponseWriter, r *http.Request) {
 func (zqdgr *ZQDGR) loadConfig() error {
 	data, err := os.ReadFile(path.Join(zqdgr.WorkingDirectory, "zqdgr.config.json"))
 	if err == nil {
-		if err := json.Unmarshal(data, &zqdgr.Config); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		err := decoder.Decode(&zqdgr.Config)
+		if err != nil {
 			return fmt.Errorf("error parsing config file: %v", err)
 		}
 	} else {
@@ -259,19 +310,30 @@ func (zqdgr *ZQDGR) loadConfig() error {
 		}
 	}
 
+	if zqdgr.Config.ExcludedDirs != nil {
+		fmt.Printf("WARNING: the 'excluded_dirs' key is deprecated, please use 'excluded_globs' instead\n")
+
+		zqdgr.Config.ExcludedGlobs = append(zqdgr.Config.ExcludedGlobs, zqdgr.Config.ExcludedDirs...)
+	}
+
 	return nil
 }
 
 func main() {
 	noWs := flag.Bool("no-ws", false, "Disable WebSocket server")
 	configDir := flag.String("config", ".", "Path to the config directory")
+	disableReloadConfig := flag.Bool("no-reload-config", false, "Do not restart ZQDGR on config file change")
 	flag.StringVar(configDir, "C", *configDir, "Path to the config directory")
 
 	flag.Parse()
 
+	originalArgs := os.Args
 	os.Args = flag.Args()
 
 	zqdgr := NewZQDGR(*noWs, *configDir)
+	if zqdgr == nil {
+		return
+	}
 
 	var command string
 	var commandArgs []string
@@ -493,6 +555,7 @@ func main() {
 			log.Fatal("watch pattern not specified in config")
 		}
 
+		// make sure the pattern is valid
 		var paternArray []string
 		var currentPattern string
 		inMatch := false
@@ -533,8 +596,8 @@ func main() {
 		}
 
 		watcherConfig := WatcherConfig{
-			excludedDirs: globList(zqdgr.Config.ExcludedDirs),
-			pattern:      paternArray,
+			excludedGlobs: globList(zqdgr.Config.ExcludedGlobs),
+			pattern:       paternArray,
 		}
 
 		watcher, err := NewWatcher(&watcherConfig)
@@ -545,6 +608,11 @@ func main() {
 		defer watcher.Close()
 
 		err = watcher.AddFiles()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		err = watcher.AddFile(path.Join(zqdgr.WorkingDirectory, "zqdgr.config.json"))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -573,7 +641,33 @@ func main() {
 					if !ok {
 						timer = time.AfterFunc(waitFor, func() {
 							if event.Op&fsnotify.Remove == fsnotify.Remove || event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
-								fmt.Println("File changed:", event.Name)
+								if os.Getenv("ZQDGR_DEBUG") != "" {
+									fmt.Println("File changed:", event.Name)
+								}
+
+								if strings.HasSuffix(event.Name, "zqdgr.config.json") {
+									// re-exec the exact same command
+									if !*disableReloadConfig {
+										log.Println("zqdgr.config.json has changed, restarting...")
+										executable, err := os.Executable()
+										if err != nil {
+											log.Fatal(err)
+										}
+
+										err = script.Stop(true)
+										if err != nil {
+											log.Fatal(err)
+										}
+
+										err = syscall.Exec(executable, originalArgs, os.Environ())
+										if err != nil {
+											log.Fatal(err)
+										}
+
+										panic("unreachable")
+									}
+								}
+
 								if directoryShouldBeTracked(&watcherConfig, event.Name) {
 									watcher.(NotifyWatcher).watcher.Add(event.Name)
 								}

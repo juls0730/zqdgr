@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/bmatcuk/doublestar"
 	"github.com/fsnotify/fsnotify"
@@ -14,12 +16,19 @@ type globList []string
 
 func (g *globList) Matches(value string) bool {
 	for _, v := range *g {
+		// if the pattern matches a filepath pattern
 		if match, err := filepath.Match(v, value); err != nil {
 			log.Fatalf("Bad pattern \"%s\": %s", v, err.Error())
 		} else if match {
 			return true
 		}
+
+		// or if the path starts with the pattern
+		if strings.HasSuffix(value, v) {
+			return true
+		}
 	}
+
 	return false
 }
 
@@ -29,12 +38,25 @@ func matchesPattern(pattern []string, path string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
 func directoryShouldBeTracked(cfg *WatcherConfig, path string) bool {
 	base := filepath.Dir(path)
-	return matchesPattern(cfg.pattern, path) && !cfg.excludedDirs.Matches(base)
+
+	if os.Getenv("ZQDGR_DEBUG") != "" {
+		log.Printf("checking %s against %s %v\n", path, base, *cfg)
+	}
+
+	if cfg.excludedGlobs.Matches(base) {
+		if os.Getenv("ZQDGR_DEBUG") != "" {
+			log.Printf("%s is excluded\n", base)
+		}
+		return false
+	}
+
+	return matchesPattern(cfg.pattern, path)
 }
 
 func pathMatches(cfg *WatcherConfig, path string) bool {
@@ -42,13 +64,14 @@ func pathMatches(cfg *WatcherConfig, path string) bool {
 }
 
 type WatcherConfig struct {
-	excludedDirs globList
-	pattern      globList
+	excludedGlobs globList
+	pattern       globList
 }
 
 type FileWatcher interface {
 	Close() error
 	AddFiles() error
+	AddFile(path string) error
 	add(path string) error
 	getConfig() *WatcherConfig
 }
@@ -60,6 +83,14 @@ type NotifyWatcher struct {
 
 func (n NotifyWatcher) Close() error {
 	return n.watcher.Close()
+}
+
+func (n NotifyWatcher) AddFile(path string) error {
+	if os.Getenv("ZQDGR_DEBUG") != "" {
+		log.Printf("manually adding file\n")
+	}
+
+	return n.add(path)
 }
 
 func (n NotifyWatcher) AddFiles() error {
@@ -79,10 +110,12 @@ func NewWatcher(cfg *WatcherConfig) (FileWatcher, error) {
 		err := errors.New("no config specified")
 		return nil, err
 	}
+
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
+
 	return NotifyWatcher{
 		watcher: w,
 		cfg:     cfg,
@@ -92,18 +125,31 @@ func NewWatcher(cfg *WatcherConfig) (FileWatcher, error) {
 func addFiles(fw FileWatcher) error {
 	cfg := fw.getConfig()
 	for _, pattern := range cfg.pattern {
+		if os.Getenv("ZQDGR_DEBUG") != "" {
+			fmt.Printf("processing glob %s\n", pattern)
+		}
+
 		matches, err := doublestar.Glob(pattern)
 		if err != nil {
 			log.Fatalf("Bad pattern \"%s\": %s", pattern, err.Error())
 		}
+
 		for _, match := range matches {
+			if os.Getenv("ZQDGR_DEBUG") != "" {
+				log.Printf("checking %s\n", match)
+			}
+
 			if directoryShouldBeTracked(cfg, match) {
+				if os.Getenv("ZQDGR_DEBUG") != "" {
+					log.Printf("%s is not excluded\n", match)
+				}
+
 				if err := fw.add(match); err != nil {
 					return fmt.Errorf("FileWatcher.Add(): %v", err)
 				}
 			}
 		}
-
 	}
+
 	return nil
 }
