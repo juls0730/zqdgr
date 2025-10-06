@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
+	"log/slog"
 	"path/filepath"
 	"strings"
 
@@ -34,7 +34,9 @@ func (g *globList) Matches(value string) bool {
 
 func matchesPattern(pattern []string, path string) bool {
 	for _, p := range pattern {
+		slog.Debug("checking path against pattern", "pattern", p, "path", path)
 		if matched, _ := doublestar.Match(p, path); matched {
+			slog.Debug("path matches pattern", "pattern", p, "path", path)
 			return true
 		}
 	}
@@ -42,17 +44,13 @@ func matchesPattern(pattern []string, path string) bool {
 	return false
 }
 
-func directoryShouldBeTracked(cfg *WatcherConfig, path string) bool {
+func pathShouldBeTracked(cfg *WatcherConfig, path string) bool {
 	base := filepath.Dir(path)
 
-	if os.Getenv("ZQDGR_DEBUG") != "" {
-		log.Printf("checking %s against %s %v\n", path, base, *cfg)
-	}
+	slog.Debug("checking file against path", "path", path, "base", base)
 
 	if cfg.excludedGlobs.Matches(base) {
-		if os.Getenv("ZQDGR_DEBUG") != "" {
-			log.Printf("%s is excluded\n", base)
-		}
+		slog.Debug("file is excluded", "path", path)
 		return false
 	}
 
@@ -86,9 +84,7 @@ func (n NotifyWatcher) Close() error {
 }
 
 func (n NotifyWatcher) AddFile(path string) error {
-	if os.Getenv("ZQDGR_DEBUG") != "" {
-		log.Printf("manually adding file\n")
-	}
+	slog.Debug("manually adding file", "file", path)
 
 	return n.add(path)
 }
@@ -125,24 +121,36 @@ func NewWatcher(cfg *WatcherConfig) (FileWatcher, error) {
 func addFiles(fw FileWatcher) error {
 	cfg := fw.getConfig()
 	for _, pattern := range cfg.pattern {
-		if os.Getenv("ZQDGR_DEBUG") != "" {
-			fmt.Printf("processing glob %s\n", pattern)
-		}
+		slog.Debug("adding pattern", "pattern", pattern)
 
 		matches, err := doublestar.Glob(pattern)
 		if err != nil {
 			log.Fatalf("Bad pattern \"%s\": %s", pattern, err.Error())
 		}
 
+		trackedDirs := make(map[string]bool)
 		for _, match := range matches {
-			if os.Getenv("ZQDGR_DEBUG") != "" {
-				log.Printf("checking %s\n", match)
+			base := filepath.Dir(match)
+			// this allows us to track file creations and deletions
+			if !trackedDirs[base] {
+				if cfg.excludedGlobs.Matches(base) {
+					slog.Debug("directory is excluded", "file", match)
+					continue
+				}
+
+				trackedDirs[base] = true
+
+				slog.Debug("adding directory", "dir", base)
+
+				if err := fw.add(base); err != nil {
+					return fmt.Errorf("FileWatcher.Add(): %v", err)
+				}
 			}
 
-			if directoryShouldBeTracked(cfg, match) {
-				if os.Getenv("ZQDGR_DEBUG") != "" {
-					log.Printf("%s is not excluded\n", match)
-				}
+			slog.Debug("adding file", "file", match)
+
+			if pathShouldBeTracked(cfg, match) {
+				slog.Debug("path should be tracked", "file", match)
 
 				if err := fw.add(match); err != nil {
 					return fmt.Errorf("FileWatcher.Add(): %v", err)

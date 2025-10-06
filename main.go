@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -231,6 +233,8 @@ func (s *Script) Stop(lock bool) error {
 }
 
 func (s *Script) Restart() error {
+	slog.Debug("Restarting script", "script", s.scriptName)
+
 	s.mutex.Lock()
 
 	err := s.Stop(false)
@@ -325,12 +329,27 @@ func (zqdgr *ZQDGR) loadConfig() error {
 }
 
 func main() {
+	var err error
+	var debugMode bool
+
 	noWs := flag.Bool("no-ws", false, "Disable WebSocket server")
 	configDir := flag.String("config", ".", "Path to the config directory")
 	disableReloadConfig := flag.Bool("no-reload-config", false, "Do not restart ZQDGR on config file change")
 	flag.StringVar(configDir, "C", *configDir, "Path to the config directory")
 
 	flag.Parse()
+
+	debugModeVal, ok := os.LookupEnv("ZQDGR_DEBUG")
+	if ok {
+		debugMode, err = strconv.ParseBool(debugModeVal)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if debugMode {
+			slog.SetLogLoggerLevel(slog.LevelDebug)
+		}
+	}
 
 	originalArgs := os.Args
 	os.Args = flag.Args()
@@ -525,19 +544,7 @@ func main() {
 
 		log.Println("Received signal, exiting...")
 		if script.command != nil {
-			var signal syscall.Signal
-			switch zqdgr.Config.ShutdownSignal {
-			case "SIGINT":
-				signal = syscall.SIGINT
-			case "SIGTERM":
-				signal = syscall.SIGTERM
-			case "SIGQUIT":
-				signal = syscall.SIGQUIT
-			default:
-				signal = syscall.SIGKILL
-			}
-
-			syscall.Kill(-script.command.Process.Pid, signal)
+			script.Stop(true)
 		}
 
 		os.Exit(0)
@@ -645,15 +652,15 @@ func main() {
 
 					if !ok {
 						timer = time.AfterFunc(waitFor, func() {
+							slog.Debug("FSnotify event received", "event", event)
+
 							if event.Op&fsnotify.Remove == fsnotify.Remove || event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
-								if os.Getenv("ZQDGR_DEBUG") != "" {
-									fmt.Println("File changed:", event.Name)
-								}
+								slog.Debug("File changed", "file", event.Name)
 
 								if strings.HasSuffix(event.Name, "zqdgr.config.json") {
 									// re-exec the exact same command
 									if !*disableReloadConfig {
-										log.Println("zqdgr.config.json has changed, restarting...")
+										fmt.Println("zqdgr.config.json has changed, restarting...")
 										executable, err := os.Executable()
 										if err != nil {
 											log.Fatal(err)
@@ -673,7 +680,8 @@ func main() {
 									}
 								}
 
-								if directoryShouldBeTracked(&watcherConfig, event.Name) {
+								if pathShouldBeTracked(&watcherConfig, event.Name) && event.Op&fsnotify.Create == fsnotify.Create {
+									slog.Debug("Adding new file to watcher", "file", event.Name)
 									watcher.(NotifyWatcher).watcher.Add(event.Name)
 								}
 
