@@ -194,6 +194,11 @@ func (s *Script) Stop(lock bool) error {
 			signal = syscall.SIGKILL
 		}
 
+		// make sure the process is not dead
+		if s.command.ProcessState != nil && s.command.ProcessState.Exited() {
+			return nil
+		}
+
 		if err := syscall.Kill(-s.command.Process.Pid, signal); err != nil {
 			log.Printf("error killing previous process: %v", err)
 			return err
