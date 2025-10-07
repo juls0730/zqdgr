@@ -50,14 +50,12 @@ type Config struct {
 }
 
 type Script struct {
-	zqdgr        *ZQDGR
-	command      *exec.Cmd
-	mutex        sync.Mutex
-	scriptName   string
-	isRestarting bool
-	wg           sync.WaitGroup
-	// the exit code of the script, only set after the script has exited
-	exitCode int
+	zqdgr      *ZQDGR
+	command    *exec.Cmd
+	mutex      sync.Mutex
+	scriptName string
+	// notified with the exit code of the script when it exits
+	exitCode chan int
 }
 
 type ZQDGR struct {
@@ -134,10 +132,10 @@ func (zqdgr *ZQDGR) NewScript(scriptName string, args ...string) *Script {
 	}
 
 	return &Script{
-		zqdgr:        zqdgr,
-		command:      command,
-		scriptName:   scriptName,
-		isRestarting: false,
+		zqdgr:      zqdgr,
+		command:    command,
+		scriptName: scriptName,
+		exitCode:   make(chan int),
 	}
 }
 
@@ -145,73 +143,65 @@ func (s *Script) Start() error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	s.wg.Add(1)
-
 	err := s.command.Start()
 	if err != nil {
-		s.wg.Done()
 		return err
 	}
 
 	go func() {
-		err := s.command.Wait()
-		if err != nil {
-			if exitError, ok := err.(*exec.ExitError); ok {
-				s.exitCode = exitError.ExitCode()
-			} else {
-				// Other errors (e.g., process not found, permission denied)
-				if !s.isRestarting {
-					log.Printf("Error waiting for script %s: %v", s.scriptName, err)
-					s.exitCode = 1
-				}
-			}
-		}
+		processState, err := s.command.Process.Wait()
+		slog.Debug("Script exited", "script", s.scriptName, "error", err)
 
-		if !s.isRestarting {
-			s.wg.Done()
-		}
+		s.exitCode <- processState.ExitCode()
 	}()
 
 	return err
 }
 
-func (s *Script) Stop(lock bool) error {
-	if lock {
-		s.mutex.Lock()
-		defer s.mutex.Unlock()
-	}
-
-	s.isRestarting = true
-
-	if s.command.Process != nil {
-		var signal syscall.Signal
-		switch s.zqdgr.Config.ShutdownSignal {
-		case "SIGINT":
-			signal = syscall.SIGINT
-		case "SIGTERM":
-			signal = syscall.SIGTERM
-		case "SIGQUIT":
-			signal = syscall.SIGQUIT
-		default:
-			signal = syscall.SIGKILL
-		}
-
-		// make sure the process is not dead
-		if s.command.ProcessState != nil && s.command.ProcessState.Exited() {
+// it is the caller's responsibility to lock the mutex before calling this function
+func (s *Script) Stop() error {
+	slog.Debug("Making sure process is still alive")
+	if runtime.GOOS == "windows" {
+		if _, err := os.FindProcess(s.command.Process.Pid); err != nil {
+			// process is already dead
 			return nil
 		}
-
-		if err := syscall.Kill(-s.command.Process.Pid, signal); err != nil {
-			log.Printf("error killing previous process: %v", err)
+	} else {
+		process, err := os.FindProcess(s.command.Process.Pid)
+		if err != nil {
 			return err
 		}
+		// Sending signal 0 checks for existence and permissions
+		err = process.Signal(syscall.Signal(0))
+		if err != nil {
+			return nil
+		}
 	}
+
+	slog.Debug("Process is still alive, sending signal")
 
 	dead := make(chan bool)
 	go func() {
 		s.command.Wait()
 		dead <- true
 	}()
+
+	var signal syscall.Signal
+	switch s.zqdgr.Config.ShutdownSignal {
+	case "SIGINT":
+		signal = syscall.SIGINT
+	case "SIGTERM":
+		signal = syscall.SIGTERM
+	case "SIGQUIT":
+		signal = syscall.SIGQUIT
+	default:
+		signal = syscall.SIGKILL
+	}
+
+	if err := syscall.Kill(-s.command.Process.Pid, signal); err != nil {
+		log.Printf("error killing previous process: %v", err)
+		return err
+	}
 
 	shutdownTimeout := s.zqdgr.Config.ShutdownTimeout
 	if shutdownTimeout == 0 {
@@ -237,7 +227,7 @@ func (s *Script) Restart() error {
 
 	s.mutex.Lock()
 
-	err := s.Stop(false)
+	err := s.Stop()
 	if err != nil {
 		s.mutex.Unlock()
 		return err
@@ -250,8 +240,6 @@ func (s *Script) Restart() error {
 		log.Fatal("script not found")
 		return nil
 	}
-
-	s.isRestarting = false
 
 	s.mutex.Unlock()
 
@@ -272,10 +260,6 @@ func (s *Script) Restart() error {
 	}
 
 	return err
-}
-
-func (s *Script) Wait() {
-	s.wg.Wait()
 }
 
 func (wsServer *WSServer) handleWs(w http.ResponseWriter, r *http.Request) {
@@ -328,33 +312,76 @@ func (zqdgr *ZQDGR) loadConfig() error {
 	return nil
 }
 
+func validatePattern(pattern string) ([]string, error) {
+	var paternArray []string
+	var currentPattern string
+	inMatch := false
+	// iterate over every letter in the pattern
+	for _, p := range pattern {
+		if string(p) == "{" {
+			if inMatch {
+				return nil, fmt.Errorf("unexpected { in pattern")
+			}
+
+			inMatch = true
+		}
+
+		if string(p) == "}" {
+			if !inMatch {
+				return nil, fmt.Errorf("enexpected } in pattern")
+			}
+
+			inMatch = false
+		}
+
+		if string(p) == "," && !inMatch {
+			paternArray = append(paternArray, currentPattern)
+			currentPattern = ""
+			continue
+		}
+
+		currentPattern += string(p)
+	}
+
+	if inMatch {
+		return nil, fmt.Errorf("unmatched } in pattern")
+	}
+
+	if currentPattern != "" {
+		paternArray = append(paternArray, currentPattern)
+	}
+
+	return paternArray, nil
+}
+
 func main() {
-	var err error
+	// var err error
 	var debugMode bool
 
 	noWs := flag.Bool("no-ws", false, "Disable WebSocket server")
 	configDir := flag.String("config", ".", "Path to the config directory")
-	disableReloadConfig := flag.Bool("no-reload-config", false, "Do not restart ZQDGR on config file change")
 	flag.StringVar(configDir, "C", *configDir, "Path to the config directory")
+	disableReloadConfig := flag.Bool("no-reload-config", false, "Do not restart ZQDGR on config file change")
 
 	flag.Parse()
 
-	debugModeVal, ok := os.LookupEnv("ZQDGR_DEBUG")
-	if ok {
-		debugMode, err = strconv.ParseBool(debugModeVal)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		if debugMode {
-			slog.SetLogLoggerLevel(slog.LevelDebug)
-		}
+	// if ParseBool returns an error, ZQDGR_DEBUG is not a bool
+	debugMode, _ = strconv.ParseBool(os.Getenv("ZQDGR_DEBUG"))
+	if debugMode {
+		slog.SetLogLoggerLevel(slog.LevelDebug)
 	}
 
 	originalArgs := os.Args
 	os.Args = flag.Args()
 
-	zqdgr := NewZQDGR(*noWs, *configDir)
+	expandedConfigDir, err := filepath.Abs(*configDir)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	slog.Debug("noWS", "noWs", *noWs, "configDir", *configDir, "expandedConfigDir", expandedConfigDir, "disableReloadConfig", *disableReloadConfig)
+
+	zqdgr := NewZQDGR(*noWs, expandedConfigDir)
 	if zqdgr == nil {
 		return
 	}
@@ -362,10 +389,13 @@ func main() {
 	var command string
 	var commandArgs []string
 
+	// command name trimmed by flags.Args()
+	// os.Args ~= [script, --, arguments]
 	for i, arg := range os.Args {
 		if arg == "--" {
-			if i+2 < len(os.Args) {
-				commandArgs = os.Args[i+2:]
+			slog.Debug("Found double-dash", "i", i, "len(os.Args)", len(os.Args), "os.Args", os.Args)
+			if len(os.Args)-i > 1 {
+				commandArgs = os.Args[i+1:]
 			}
 			break
 		}
@@ -377,6 +407,8 @@ func main() {
 
 		commandArgs = append(commandArgs, arg)
 	}
+
+	slog.Debug("Collected", "command", command, "commandArgs", commandArgs)
 
 	watchMode := false
 	var scriptName string
@@ -520,13 +552,7 @@ func main() {
 			log.Fatal("please specify a script to run")
 		}
 		watchMode = true
-		for i := range commandArgs {
-			if strings.HasPrefix(commandArgs[i], "-") {
-				continue
-			}
-
-			scriptName = commandArgs[i]
-		}
+		scriptName = commandArgs[0]
 	default:
 		scriptName = command
 	}
@@ -544,7 +570,9 @@ func main() {
 
 		log.Println("Received signal, exiting...")
 		if script.command != nil {
-			script.Stop(true)
+			script.mutex.Lock()
+			script.Stop()
+			script.mutex.Unlock()
 		}
 
 		os.Exit(0)
@@ -568,48 +596,21 @@ func main() {
 		}
 
 		// make sure the pattern is valid
-		var paternArray []string
-		var currentPattern string
-		inMatch := false
-		// iterate over every letter in the pattern
-		for _, p := range zqdgr.Config.Pattern {
-			if string(p) == "{" {
-				if inMatch {
-					log.Fatal("unmatched { in pattern")
-				}
-
-				inMatch = true
-			}
-
-			if string(p) == "}" {
-				if !inMatch {
-					log.Fatal("unmatched } in pattern")
-				}
-
-				inMatch = false
-			}
-
-			if string(p) == "," && !inMatch {
-				paternArray = append(paternArray, currentPattern)
-				currentPattern = ""
-				inMatch = false
-				continue
-			}
-
-			currentPattern += string(p)
+		patternArray, err := validatePattern(zqdgr.Config.Pattern)
+		if err != nil {
+			log.Fatal(err)
 		}
 
-		if inMatch {
-			log.Fatal("unmatched } in pattern")
-		}
-
-		if currentPattern != "" {
-			paternArray = append(paternArray, currentPattern)
+		for _, pattern := range zqdgr.Config.ExcludedGlobs {
+			_, err := validatePattern(pattern)
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 
 		watcherConfig := WatcherConfig{
 			excludedGlobs: globList(zqdgr.Config.ExcludedGlobs),
-			pattern:       paternArray,
+			pattern:       patternArray,
 		}
 
 		watcher, err := NewWatcher(&watcherConfig)
@@ -629,13 +630,12 @@ func main() {
 			log.Fatal(err)
 		}
 
-		// We use this timer to deduplicate events.
+		// tailing edge debounce of file system events
 		var (
-			// Wait 100ms for new events; each new event resets the timer.
 			waitFor = 100 * time.Millisecond
 
-			// Keep track of the timers, as path → timer.
-			mu     sync.Mutex
+			mu sync.Mutex
+			// watched filepath -> timer
 			timers = make(map[string]*time.Timer)
 		)
 		go func() {
@@ -657,7 +657,15 @@ func main() {
 							if event.Op&fsnotify.Remove == fsnotify.Remove || event.Op&fsnotify.Write == fsnotify.Write || event.Op&fsnotify.Create == fsnotify.Create {
 								slog.Debug("File changed", "file", event.Name)
 
-								if strings.HasSuffix(event.Name, "zqdgr.config.json") {
+								fullEventPath, err := filepath.Abs(event.Name)
+								if err != nil {
+									log.Fatal(err)
+								}
+								slog.Debug("expanded event path", "path", fullEventPath)
+
+								// check against the fullpath to make sure that the config file that was changed is
+								// actually the one we are using
+								if fullEventPath == filepath.Join(zqdgr.WorkingDirectory, "zqdgr.config.json") {
 									// re-exec the exact same command
 									if !*disableReloadConfig {
 										fmt.Println("zqdgr.config.json has changed, restarting...")
@@ -666,10 +674,14 @@ func main() {
 											log.Fatal(err)
 										}
 
-										err = script.Stop(true)
+										script.mutex.Lock()
+
+										err = script.Stop()
 										if err != nil {
 											log.Fatal(err)
 										}
+
+										script.mutex.Unlock()
 
 										err = syscall.Exec(executable, originalArgs, os.Environ())
 										if err != nil {
@@ -680,9 +692,16 @@ func main() {
 									}
 								}
 
-								if pathShouldBeTracked(&watcherConfig, event.Name) && event.Op&fsnotify.Create == fsnotify.Create {
-									slog.Debug("Adding new file to watcher", "file", event.Name)
-									watcher.(NotifyWatcher).watcher.Add(event.Name)
+								if pathShouldBeTracked(&watcherConfig, event.Name) {
+									if event.Op&fsnotify.Create == fsnotify.Create {
+										slog.Debug("Adding new file to watcher", "file", event.Name)
+										watcher.(NotifyWatcher).watcher.Add(event.Name)
+									}
+
+									if event.Op&fsnotify.Remove == fsnotify.Remove {
+										slog.Debug("Removing file from watcher", "file", event.Name)
+										watcher.(NotifyWatcher).watcher.Remove(event.Name)
+									}
 								}
 
 								if pathMatches(&watcherConfig, event.Name) {
@@ -715,8 +734,17 @@ func main() {
 				}
 			}
 		}()
+
+		// block until the script exits with a zero (aka, it normally exited on its own)
+		for {
+			exitCode := <-script.exitCode
+			slog.Debug("Script exited", "script", scriptName, "exitCode", exitCode)
+			if exitCode == 0 {
+				os.Exit(0)
+			}
+		}
 	}
 
-	script.Wait()
-	os.Exit(script.exitCode)
+	// block until the script exits
+	os.Exit(<-script.exitCode)
 }
