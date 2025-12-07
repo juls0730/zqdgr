@@ -5,6 +5,13 @@ how you would use npm. ZQDGR lets you watch files and rebuild your project as yo
 optional websocket server that will notify listeners that a rebuild has occurred, this is very useful for live reloading
 when doing web development with Go.
 
+**Status: Alpha**
+
+This project is not recommend for production use, you are allowed to, and I try
+my best to keep it as stable as possible, but features and APIs will change
+in nearly every release without backwards compatibility, upgrade carefilly, and
+make sure to depend on a specific version of ZQDGR.
+
 ## Install
 
 ```bash

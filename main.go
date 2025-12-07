@@ -40,13 +40,11 @@ type Config struct {
 		Type string `json:"type"`
 		URL  string `json:"url"`
 	} `json:"repository"`
-	Scripts map[string]string `json:"scripts"`
-	Pattern string            `json:"pattern"`
-	// Deprecated: use excludedGlobs instead
-	ExcludedDirs    []string `json:"excluded_dirs"`
-	ExcludedGlobs   []string `json:"excluded_files"`
-	ShutdownSignal  string   `json:"shutdown_signal"`
-	ShutdownTimeout int      `json:"shutdown_timeout"`
+	Scripts         map[string]string `json:"scripts"`
+	Pattern         string            `json:"pattern"`
+	ExcludedGlobs   []string          `json:"excluded_globs"`
+	ShutdownSignal  string            `json:"shutdown_signal"`
+	ShutdownTimeout int               `json:"shutdown_timeout"`
 }
 
 type Script struct {
@@ -301,12 +299,6 @@ func (zqdgr *ZQDGR) loadConfig() error {
 			},
 			Pattern: "**/*.go",
 		}
-	}
-
-	if zqdgr.Config.ExcludedDirs != nil {
-		fmt.Printf("WARNING: the 'excluded_dirs' key is deprecated, please use 'excluded_globs' instead\n")
-
-		zqdgr.Config.ExcludedGlobs = append(zqdgr.Config.ExcludedGlobs, zqdgr.Config.ExcludedDirs...)
 	}
 
 	return nil
