@@ -1,6 +1,6 @@
 {
     "name": "zqdgr",
-    "version": "0.0.6",
+    "version": "0.0.6.1",
     "description": "zqdgr is a quick and dirty Golang runner",
     "author": "juls0730",
     "license": "BSL-1.0",

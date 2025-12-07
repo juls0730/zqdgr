@@ -9,5 +9,5 @@
         "dev": "go run main.go"
     },
     "pattern": "**/*.go",
-    "excluded_dirs": []
+    "excluded_globs": []
 }
